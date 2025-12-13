@@ -13,6 +13,10 @@ import io.grpc.ServerBuilder;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.Socket;
+import java.util.ArrayList;         // EKLENDİ
+import java.util.Collections;       // EKLENDİ
+import java.util.List;              // EKLENDİ
+import java.util.Map;
 
 
 import java.io.IOException;
@@ -27,8 +31,32 @@ public class NodeMain {
 
     private static final int START_PORT = 5555;
     private static final int PRINT_INTERVAL_SECONDS = 10;
+    private static int TOLERANCE_LEVEL = 1; // Varsayılan 1 olsun, dosyadan okuyamazsa patlamasın// Liderin Hafızası (Defteri)
+    private static Map<Integer, List<NodeInfo>> messageLocations = new ConcurrentHashMap<Integer, List<NodeInfo>>();
 
     public static void main(String[] args) throws Exception {
+
+        // A) ÖNCE AYAR DOSYASINI OKU
+        System.out.println("⚙️ Sistem başlatılıyor...");
+        try {
+            java.nio.file.Path path = java.nio.file.Paths.get("tolerance.conf");
+            if (java.nio.file.Files.exists(path)) {
+                java.util.List<String> lines = java.nio.file.Files.readAllLines(path);
+                for (String line : lines) {
+                    if (line.startsWith("tolerance=")) {
+                        String deger = line.split("=")[1].trim();
+                        TOLERANCE_LEVEL = Integer.parseInt(deger);
+                        System.out.println("✅ tolerance.conf okundu. Hedef: " + TOLERANCE_LEVEL + " üye.");
+                    }
+                }
+            } else {
+                System.out.println("⚠️ tolerance.conf bulunamadı! Varsayılan (1) ile devam ediliyor.");
+            }
+        } catch (Exception e) {
+            System.out.println("⚠️ Dosya okuma hatası: " + e.getMessage());
+        }
+
+        // B) SONRA NORMAL BAŞLATMA İŞLEMLERİ (Senin eski kodun)
         String host = "127.0.0.1";
         int port = findFreePort(START_PORT);
 
@@ -46,22 +74,18 @@ public class NodeMain {
                 .build()
                 .start();
 
-                System.out.printf("Node started on %s:%d%n", host, port);
+        System.out.printf("Node started on %s:%d%n", host, port);
 
-                // Eğer bu ilk node ise (port 5555), TCP 6666'da text dinlesin
-                if (port == START_PORT) {
-                    startLeaderTextListener(registry, self);
-                }
+        // Eğer bu ilk node ise (port 5555), TCP 6666'da text dinlesin
+        if (port == START_PORT) {
+            startLeaderTextListener(registry, self);
+        }
 
-                discoverExistingNodes(host, port, registry, self);
-                startFamilyPrinter(registry, self);
-                startHealthChecker(registry, self);
+        discoverExistingNodes(host, port, registry, self);
+        startFamilyPrinter(registry, self);
+        startHealthChecker(registry, self);
 
-                server.awaitTermination();
-
-
-
-
+        server.awaitTermination();
     }
 
     private static void startLeaderTextListener(NodeRegistry registry, NodeInfo self) {
@@ -145,34 +169,28 @@ private static void handleClientTextConnection(Socket client,
             else if (command.equals("GET")) {
                 // Format: GET <id>
                 if (parts.length >= 2) {
-                    String idStr = parts[1];
+                    String idStr = parts[1].trim(); // trim() ekledik
                     System.out.println(">> GET COMMAND DETECTED");
                     System.out.println("   ID: " + idStr);
 
-                    // Telnet'e geri cevap yazmak için kalemimizi hazırlıyoruz
                     PrintWriter outToClient = new PrintWriter(client.getOutputStream(), true);
 
                     try {
                         int searchId = Integer.parseInt(idStr);
                         boolean found = false;
 
-                        // Liderin bildiği tüm üyelerin listesini al
                         List<NodeInfo> members = registry.snapshot();
 
-                        // --- DEDEKTİFLİK BAŞLIYOR (DÖNGÜ) ---
-                        // Sırayla herkese soracağız. Biri cevap verirse döngüyü kıracağız.
+                        // --- DÖNGÜ BAŞLIYOR ---
                         for (NodeInfo member : members) {
 
-                            // Kendisine sormasına gerek yok (veya sorabilir de, şimdilik ağdan soralım)
-                            if (member.getHost().equals(self.getHost()) && member.getPort() == self.getPort()) {
-                                continue;
-                            }
+                            // BURADAKİ "continue" ENGELİNİ KALDIRDIK!
+                            // Artık Lider kendisine de gRPC isteği atıp soracak.
 
                             System.out.println("❓ Soruluyor: " + member.getPort());
 
                             ManagedChannel channel = null;
                             try {
-                                // 1. Üyeye Bağlan
                                 channel = ManagedChannelBuilder
                                         .forAddress(member.getHost(), member.getPort())
                                         .usePlaintext()
@@ -181,31 +199,23 @@ private static void handleClientTextConnection(Socket client,
                                 FamilyServiceGrpc.FamilyServiceBlockingStub stub =
                                         FamilyServiceGrpc.newBlockingStub(channel);
 
-                                // 2. Soruyu Sor (GetRequest)
                                 family.GetRequest request = family.GetRequest.newBuilder()
                                         .setId(searchId)
                                         .build();
 
-                                // 3. Cevabı Al (GetResponse)
                                 family.GetResponse response = stub.getMessage(request);
 
-                                // 4. Üye "Buldum" dedi mi?
                                 if (response.getFound()) {
                                     System.out.println("✅ BULUNDU! Kaynak: " + member.getPort());
                                     System.out.println("📄 İÇERİK: " + response.getText());
 
-                                    // Müşteriye (Telnet'e) müjdeyi ver
                                     outToClient.println("SUCCESS: " + response.getText());
-
                                     found = true;
-                                    break; // Bulduk, daha fazla aramaya gerek yok. Döngüden çık.
+                                    break;
                                 }
 
                             } catch (Exception e) {
-                                // --- HATA TOLERANSI BURASI ---
-                                // Eğer üye çökmüşse, hata verir. Biz programı kapatmayız,
-                                // "Olsun, sıradakine bakalım" deriz.
-                                System.out.println("⚠️ Üye cevap vermedi (Ölü olabilir): " + member.getPort());
+                                System.out.println("⚠️ Üye cevap vermedi: " + member.getPort());
                             } finally {
                                 if (channel != null) channel.shutdown();
                             }
@@ -213,12 +223,12 @@ private static void handleClientTextConnection(Socket client,
                         // --- DÖNGÜ BİTTİ ---
 
                         if (!found) {
-                            outToClient.println("ERROR: Veri hicbir uyede bulunamadi.");
+                            outToClient.println("ERROR: Veri bulunamadi.");
                             System.out.println("❌ Kimse bulamadı.");
                         }
 
                     } catch (Exception e) {
-                        outToClient.println("ERROR: Sistemsel hata: " + e.getMessage());
+                        outToClient.println("ERROR: Hata: " + e.getMessage());
                     }
 
                 } else {
