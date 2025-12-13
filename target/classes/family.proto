@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package family;
+
+option java_multiple_files = true;
+option java_package = "family";
+option java_outer_classname = "FamilyProto";
+
+message NodeInfo {
+  string host = 1;
+  int32 port = 2;
+}
+
+message FamilyView {
+  repeated NodeInfo members = 1;
+}
+
+message Empty {}
+
+message ChatMessage {
+  string text = 1;
+  string fromHost = 2;
+  int32 fromPort = 3;
+  int64 timestamp = 4;
+  int32 id = 5;
+}
+
+service FamilyService {
+  rpc Join (NodeInfo) returns (FamilyView);
+  rpc GetFamily (Empty) returns (FamilyView);
+  rpc GetMessage (GetRequest) returns (GetResponse);
+  rpc ReceiveChat (ChatMessage) returns (Empty);
+
+}
+
+// Liderin sorusu: "Bana şu ID'li mesajı ver"
+message GetRequest {
+  int32 id = 1;
+}
+
+// Üyenin cevabı: "Buyur abi veri bu (veya bulamadım)"
+message GetResponse {
+  string text = 1;      // Mesajın içeriği
+  bool found = 2;       // Bulundu mu? (True/False)
+  string fromNode = 3;  // Hangi üyeden geldi
+}
+
+
+
