@@ -1,11 +1,18 @@
 package com.example.family;
 
+import family.ChatMessage;
 import family.Empty;
 import family.FamilyServiceGrpc;
 import family.FamilyView;
 import family.NodeInfo;
-import family.ChatMessage;
+import family.GetRequest;
+import family.GetResponse;
 import io.grpc.stub.StreamObserver;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.stream.Stream;
 
 public class FamilyServiceImpl extends FamilyServiceGrpc.FamilyServiceImplBase {
 
@@ -21,114 +28,70 @@ public class FamilyServiceImpl extends FamilyServiceGrpc.FamilyServiceImplBase {
     @Override
     public void join(NodeInfo request, StreamObserver<FamilyView> responseObserver) {
         registry.add(request);
-
-        FamilyView view = FamilyView.newBuilder()
-                .addAllMembers(registry.snapshot())
-                .build();
-
+        FamilyView view = FamilyView.newBuilder().addAllMembers(registry.snapshot()).build();
         responseObserver.onNext(view);
         responseObserver.onCompleted();
     }
 
     @Override
     public void getFamily(Empty request, StreamObserver<FamilyView> responseObserver) {
-        FamilyView view = FamilyView.newBuilder()
-                .addAllMembers(registry.snapshot())
-                .build();
-
+        FamilyView view = FamilyView.newBuilder().addAllMembers(registry.snapshot()).build();
         responseObserver.onNext(view);
         responseObserver.onCompleted();
     }
 
-    // Diğer düğümlerden broadcast mesajı geldiğinde
-    // Liderden veya başka bir üyeden mesaj geldiğinde çalışan fonksiyon burası
+    // --- YAZMA (SET) ---
     @Override
     public void receiveChat(ChatMessage request, StreamObserver<Empty> responseObserver) {
-        // 1. Önce yine ekrana basalım ki çalıştığını görelim (Loglama)
-        System.out.println("💬 Incoming message (ID: " + request.getId() + "):");
-        System.out.println("  From: " + request.getFromHost() + ":" + request.getFromPort());
-        System.out.println("  Text: " + request.getText());
-        System.out.println("--------------------------------------");
-
-        // --- DİSKE YAZMA İŞLEMİ (YENİ EKLEDİĞİMİZ KISIM) ---
-        // Neden ekledik? Veriler kalıcı olsun, program kapanınca silinmesin diye.
         try {
-            // A. Klasör Ayarlaması
-            // Herkesin verisi "Storage" klasöründe dursun.
-            // Files.createDirectories: Klasör yoksa oluşturur, varsa hata vermez devam eder.
-            java.nio.file.Path folder = java.nio.file.Paths.get("Storage");
-            if (!java.nio.file.Files.exists(folder)) {
-                java.nio.file.Files.createDirectories(folder);
+            System.out.println("📥 [GELEN] ID: " + request.getId());
+
+            Path folder = Paths.get("Storage");
+            if (!Files.exists(folder)) { Files.createDirectories(folder); }
+
+            String fileName = request.getId() + ".txt";
+            Path filePath = folder.resolve(fileName);
+
+            Files.write(filePath, request.getText().getBytes());
+            System.out.println("   💾 Yazıldı.");
+
+            // 1. HERKES (ÇOCUKLAR VE LİDER) KENDİ SAYISINI YAZAR
+            long myCount = NodeMain.LOCAL_STORAGE_COUNT.incrementAndGet();
+            System.out.println("   📊 [ŞAHSİ RAPOR] Şu ana kadar " + myCount + " dosya tutuyorum.");
+
+            // 2. SADECE LİDER (5555) İSE, ALTINA TOPLAM DEPOYU DA YAZAR
+            if (self.getPort() == 5555) {
+                try (Stream<Path> files = Files.list(folder)) {
+                    long totalCount = files.count();
+                    System.out.println("   📂 [TÜM DEPO]    Klasörde toplam " + totalCount + " dosya var.");
+                }
             }
 
-            // B. Dosya İsmi Belirleme
-            // Mesajın ID'sini dosya adı yapıyoruz. (Örn: 100.txt)
-            // request.getId() -> Proto dosyasına eklediğimiz yeni alan!
-            // Eğer ID 0 gelirse (eski sistemden kalma mesajsa) rastgele bir sayı verelim.
-            int msgId = request.getId();
-            if (msgId == 0) msgId = (int) (System.currentTimeMillis() % 10000);
+        } catch (Exception e) { System.err.println("Hata: " + e.getMessage()); }
 
-            String fileName = msgId + ".txt";
-            java.nio.file.Path filePath = folder.resolve(fileName);
-
-            // C. Yazma İşlemi
-            // Files.write: İçeriği (byte olarak) dosyaya yazar. Dosya yoksa oluşturur.
-            java.nio.file.Files.write(filePath, request.getText().getBytes());
-
-            System.out.println("💾 DİSKE KAYDEDİLDİ: " + fileName);
-
-        } catch (Exception e) {
-            // Hata Toleransı: Diske yazamazsak (yer yoktur vs) program çökmesin, hatayı yazıp geçsin.
-            System.err.println("❌ Dosya yazma hatası: " + e.getMessage());
-            e.printStackTrace();
-        }
-        // --- DİSKE YAZMA BİTTİ ---
-
-        // Lidere "Tamamdır kardeşim, ben mesajı aldım (ve yazdım)" cevabını dönüyoruz.
         responseObserver.onNext(Empty.newBuilder().build());
         responseObserver.onCompleted();
     }
 
-    // --- YENİ EKLENEN OKUMA FONKSİYONU ---
+    // --- OKUMA (GET) ---
     @Override
-    public void getMessage(family.GetRequest request,
-                           io.grpc.stub.StreamObserver<family.GetResponse> responseObserver) {
-
+    public void getMessage(GetRequest request, StreamObserver<GetResponse> responseObserver) {
         int istenenId = request.getId();
-        System.out.println("🔍 Lider veriyi sordu. ID: " + istenenId);
-
         String okunanVeri = "";
         boolean bulundu = false;
-
         try {
-            // 1. Dosyanın yolunu bul (Storage/100.txt)
-            String fileName = istenenId + ".txt";
-            java.nio.file.Path filePath = java.nio.file.Paths.get("Storage", fileName);
-
-            // 2. Dosya var mı kontrol et
-            if (java.nio.file.Files.exists(filePath)) {
-                // 3. Varsa hepsini oku
-                byte[] bytes = java.nio.file.Files.readAllBytes(filePath);
+            Path filePath = Paths.get("Storage", istenenId + ".txt");
+            if (Files.exists(filePath)) {
+                byte[] bytes = Files.readAllBytes(filePath);
                 okunanVeri = new String(bytes);
                 bulundu = true;
-                System.out.println("✅ Dosya bulundu ve okundu: " + fileName);
-            } else {
-                System.out.println("❌ Dosya yok: " + fileName);
             }
+        } catch (Exception e) {}
 
-        } catch (Exception e) {
-            System.err.println("Okuma hatası: " + e.getMessage());
-        }
-
-        // 4. Cevabı hazırla ve Lidere gönder
-        family.GetResponse response = family.GetResponse.newBuilder()
-                .setText(okunanVeri)
-                .setFound(bulundu)
-                .setFromNode(self.getHost() + ":" + self.getPort())
-                .build();
+        GetResponse response = GetResponse.newBuilder()
+                .setText(okunanVeri).setFound(bulundu).setFromNode(self.getHost() + ":" + self.getPort()).build();
 
         responseObserver.onNext(response);
         responseObserver.onCompleted();
     }
-    // -------------------------------------
 }
