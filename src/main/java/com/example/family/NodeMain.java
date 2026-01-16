@@ -24,23 +24,15 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 public class NodeMain {
 
     private static int TOLERANCE_LEVEL = 1;
-    // Liderin Hafızası (Hangi ID kimde?)
     private static Map<Integer, List<NodeInfo>> messageLocations = new ConcurrentHashMap<>();
-
-    // Şahsi Sayaç (Ben kaç tane yazdım?)
-    public static AtomicLong LOCAL_STORAGE_COUNT = new AtomicLong(0);
-
     private static final Map<String, ManagedChannel> channelCache = new ConcurrentHashMap<>();
     private static final int START_PORT = 5555;
-
-    // Rapor Sıklığı: 3 Saniye
-    private static final int REPORT_INTERVAL_SECONDS = 3;
+    private static final int REPORT_INTERVAL_SECONDS = 5;
 
     public static void main(String[] args) throws Exception {
         System.out.println("⚙️ Sistem başlatılıyor...");
@@ -69,11 +61,9 @@ public class NodeMain {
 
         if (port == START_PORT) {
             startLeaderTextListener(registry, self);
-            // LİDER RAPORU (FULL PAKET)
-            startLeaderFullReport(registry);
+            startLeaderFullReport(registry, port);
         } else {
-            // ÇOCUK RAPORU
-            startMemberReport(port);
+            startMemberDiskReport(port);
         }
 
         discoverExistingNodes(host, port, registry, self);
@@ -81,48 +71,48 @@ public class NodeMain {
         server.awaitTermination();
     }
 
-    // --- LİDERİN KRAL RAPORU (GÜNCELLENDİ) ---
-    private static void startLeaderFullReport(NodeRegistry registry) {
+    // --- LİDERİN RAPORU ---
+    private static void startLeaderFullReport(NodeRegistry registry, int myPort) {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleAtFixedRate(() -> {
             try {
-                // 1. Hafızadaki Bilgi
+                // RAM Bilgisi
                 int totalGlobal = messageLocations.size();
                 int activeMembers = registry.snapshot().size();
 
-                // 2. Liderin Şahsi Emeği
-                long myPersonalCount = LOCAL_STORAGE_COUNT.get();
-
-                // 3. (YENİ) Gerçek Fiziksel Klasör Sayımı
-                long totalPhysicalFiles = 0;
-                Path sharedStorage = Paths.get("Storage");
-                if (Files.exists(sharedStorage)) {
-                    try (Stream<Path> files = Files.list(sharedStorage)) { totalPhysicalFiles = files.count(); }
+                // Liderin Kendi Klasörü
+                long myLocalFiles = 0;
+                Path myDir = Paths.get("Storage_" + myPort);
+                if (Files.exists(myDir)) {
+                    try (Stream<Path> files = Files.list(myDir)) { myLocalFiles = files.count(); }
                 }
 
-                System.out.println("\n================== [ LİDER RAPORU ] ==================");
-                System.out.println("🌍 SİSTEM İNDEKSİ : " + totalGlobal + " Mesaj (RAM)");
+                System.out.println("\n");
+                System.out.println("================== [ LİDER RAPORU ] ==================");
+                System.out.println("🧠 HAFIZA DURUMU  : " + totalGlobal + " Mesaj İndekslendi");
                 System.out.println("👥 AKTİF ÜYE      : " + activeMembers + " Adet");
                 System.out.println("------------------------------------------------------");
-                System.out.println("🏠 LİDERİN KASASI : " + myPersonalCount + " Dosya (Ben Yazdım)");
-                System.out.println("📂 TÜM STORAGE    : " + totalPhysicalFiles + " Dosya (Herkesin Toplamı)");
+                System.out.println("🏠 LİDERİN DEPOSU : " + myLocalFiles + " Dosya (Storage_" + myPort + ")");
                 System.out.println("======================================================\n");
 
             } catch (Throwable t) {}
         }, 5, REPORT_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
 
-    // --- ÇOCUK RAPORU ---
-    private static void startMemberReport(int myPort) {
+    // --- ÜYENİN RAPORU (Sadece Kendi Diski) ---
+    private static void startMemberDiskReport(int myPort) {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleAtFixedRate(() -> {
             try {
-                long myCount = LOCAL_STORAGE_COUNT.get();
-                System.out.println("💾 [RAPOR - ÜYE " + myPort + "] Ben toplam " + myCount + " mesaj kaydettim.");
+                Path dir = Paths.get("Storage_" + myPort);
+                long count = 0;
+                if (Files.exists(dir)) {
+                    try (Stream<Path> files = Files.list(dir)) { count = files.count(); }
+                }
+                System.out.println("💾 [PERİYODİK RAPOR Node:" + myPort + "] Klasörde " + count + " dosya var.");
             } catch (Throwable e) {}
         }, 5, REPORT_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
-
 
     private static ManagedChannel getChannel(String host, int port) {
         String key = host + ":" + port;
@@ -187,8 +177,12 @@ public class NodeMain {
                             int searchId = Integer.parseInt(parts[1].trim());
                             System.out.println("🔍 [GET] İstek -> ID: " + searchId);
                             boolean found = false;
+
                             List<NodeInfo> members = registry.snapshot();
-                            for (NodeInfo member : members) {
+                            List<NodeInfo> searchOrder = new ArrayList<>(members);
+                            Collections.shuffle(searchOrder);
+
+                            for (NodeInfo member : searchOrder) {
                                 try {
                                     System.out.println("   ❓ Soruluyor: " + member.getPort());
                                     ManagedChannel channel = getChannel(member.getHost(), member.getPort());
